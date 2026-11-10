@@ -34,7 +34,19 @@ static void put_bytes(unsigned to, const unsigned char *from, unsigned count)
         "shr $1, %%cx\n\trep movsw\n\tjnc 1f\n\tmovsb\n1:\tpop %%es"
         : "+S"(from), "+D"(to), "+c"(count) : "a"(segment) : "cc", "memory");
 }
+static void get_bytes(unsigned char *to, unsigned from, unsigned count)
+{
+    unsigned segment = (unsigned)((unsigned long)ew_tandy_video >> 16);
+    __asm__ volatile (
+        "push %%ds\n\tpush %%es\n\tpush %%ss\n\tpop %%es\n\tmov %%ax, %%ds\n\tcld\n\t"
+        "rep movsb\n\tpop %%es\n\tpop %%ds"
+        : "+S"(from), "+D"(to), "+c"(count) : "a"(segment) : "cc", "memory");
+}
 #else
+static void get_bytes(unsigned char *to, unsigned from, unsigned count)
+{
+    while (count--) *to++ = ew_tandy_video[from++];
+}
 static void move_bytes(unsigned to, unsigned from, unsigned count)
 {
     while (count--) ew_tandy_video[to++] = ew_tandy_video[from++];
@@ -95,19 +107,22 @@ void ew_tandy_row(int x, int y, const unsigned char *line,
                   const unsigned char *mask, unsigned width)
 {
     unsigned offset = EW_TANDY_OFFSET(x, y), i = 0, n;
-    unsigned char keep;
+    unsigned char keep, merged[EW_TANDY_ROW_BYTES + 1];
+    if (!width) return;
     if (mask) {
-        /* Transparent rows are rare and short; merge pixel by pixel. */
+        /* Fetch the row once, merge in near memory, store it once: far
+         * read-modify-write per pixel is several times slower on an 8088. */
+        n = (width + (x & 1) + 1) >> 1;
+        get_bytes(merged, offset, n);
         for (; i < width; ++i) {
-            n = i + (x & 1);
             if (!(mask[i >> 3] & (0x80U >> (i & 7)))) continue;
+            n = i + (x & 1);
             keep = n & 1 ? 0xf0 : 0x0f;
-            ew_tandy_video[offset + (n >> 1)] =
-                (ew_tandy_video[offset + (n >> 1)] & keep) | (line[n >> 1] & ~keep);
+            merged[n >> 1] = (merged[n >> 1] & keep) | (line[n >> 1] & ~keep);
         }
+        put_bytes(offset, merged, (width + (x & 1) + 1) >> 1);
         return;
     }
-    if (!width) return;
     if (x & 1) {
         ew_tandy_video[offset] = (ew_tandy_video[offset] & 0xf0) | (line[0] & 0x0f);
         ++offset; ++line; --width;

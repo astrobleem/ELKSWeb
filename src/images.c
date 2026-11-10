@@ -357,18 +357,37 @@ void ew_image_draw(const struct ew_run EW_FAR *r, int x, int y, int top, int bot
       unsigned char pixel;
       if (count>320) count=320;
       if (cover) memset(opacity,0,40);
-      if (image->width==r->n && !cover && !((sx^at)&1)) {
+      if (image->width==r->n && !cover) {
+        /* Natural width: whole bytes, moved once from far memory. An image
+         * at the other nibble phase is the same bytes shifted by four bits. */
+        unsigned bytes=(count+at+1)>>1, have=image->stride-(sx>>1);
+        unsigned char previous=0, current;
         source+=sx>>1;
-        for (col=0;col<(count+at+1)>>1;++col) bits[col]=source[col];
-      } else for (col=0;col<count;++col,++at) {
-        pixel=source[sx>>1];
+        if (!((sx^at)&1)) for (col=0;col<bytes;++col) bits[col]=source[col];
+        else if (at) for (col=0;col<bytes;++col) {
+          current=col<have ? source[col] : 0;
+          bits[col]=(unsigned char)(previous<<4)|(current>>4);
+          previous=current;
+        } else for (col=0,previous=source[0];col<bytes;++col) {
+          current=col+1<have ? source[col+1] : 0;
+          bits[col]=(unsigned char)(previous<<4)|(current>>4);
+          previous=current;
+        }
+      } else {
+        /* Scaled or transparent: bring the stored row near, then sample. */
+        unsigned char stored[160], covered[40];
+        for (col=0;col<image->stride && col<160;++col) stored[col]=source[col];
+        if (cover) for (col=0;col<(image->width+7)>>3 && col<40;++col) covered[col]=cover[col];
+        for (col=0;col<count;++col,++at) {
+        pixel=stored[sx>>1];
         pixel=sx&1 ? pixel&15 : pixel>>4;
         if (at&1) bits[at>>1]=(bits[at>>1]&0xf0)|pixel;
         else bits[at>>1]=pixel<<4;
-        if (cover && (cover[sx>>3]&(0x80U>>(sx&7)))) opacity[col>>3]|=0x80U>>(col&7);
+        if (cover && (covered[sx>>3]&(0x80U>>(sx&7)))) opacity[col>>3]|=0x80U>>(col&7);
         sx+=x_step;
         if (x_error>=r->n-x_remainder) { x_error-=r->n-x_remainder; ++sx; }
         else x_error+=x_remainder;
+        }
       }
       ew_row4(screen_x,screen_y,bits,cover ? opacity : NULL,count);
       goto next_row;
