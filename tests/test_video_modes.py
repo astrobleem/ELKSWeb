@@ -47,6 +47,9 @@ SOURCE = r'''
 #include <string.h>
 #include <stdlib.h>
 #include "DRIVER"
+#include "elks_tandy.c"
+/* No kernel colour reservation: these cases cover the monochrome adapters. */
+unsigned ew_test_color_probe(void) {return 0;}
 unsigned char test_cga[65536], test_planar[65536];
 static unsigned char expected[65536];
 static int oracle_right=640, oracle_top, oracle_bottom=480;

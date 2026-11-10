@@ -12,8 +12,8 @@ cp toolchain/retain-elf2elks.py build/host-tools/elf2elks
 chmod +x build/host-tools/elf2elks
 export ELKSWEB_REAL_ELF2ELKS="$TOPDIR/elks/tools/bin/elf2elks"
 export PATH="$app_root/build/host-tools:$PATH"
-cflags=(-march=i8086 -mtune=i8086 -mcmodel=small -melks-libc
-    -mno-segment-relocation-stuff -Os -Wall -Wextra -fstack-usage
+cflags=(-march=i8086 -mtune=i8086 -mcmodel=medium -melks-libc
+    -Os -Wall -Wextra -fstack-usage
     -fno-builtin-printf -fno-builtin-fprintf -I./src -I./platform -I./font)
 mkdir -p build/obj
 rm -f build/obj/*.o build/obj/*.su
