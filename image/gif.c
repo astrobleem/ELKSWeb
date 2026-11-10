@@ -19,13 +19,17 @@ struct lzw_workspace {
     uint16_t prefix[4096];
     unsigned char suffix[4096];
     unsigned char stack[4096];
-    /* Colour decoding only; monochrome allocations stop before this. */
+};
+
+/* Keep the monochrome dictionary as a complete 16 KB object. Colour-only
+ * state extends it without allocating an undersized struct in mono mode. */
+struct color_workspace {
+    struct lzw_workspace lzw;
     unsigned char rgb[256][3];      /* Palette, six bits per channel. */
     unsigned char pair[256];        /* Main colour high nibble, partner low. */
     unsigned char mix[256];         /* Partner share in 16ths; 255 = unset. */
     uint16_t xmap[EW_GIF_MAX_WIDTH]; /* Stored column, or 0xffff if dropped. */
 };
-#define MONO_WORKSPACE ((unsigned)(4096U * 4))
 
 struct reader {
     const unsigned char EW_GIF_FAR *data;
@@ -66,7 +70,7 @@ static int skip_blocks(struct reader *r)
 }
 
 static int palette(struct reader *r, unsigned count, unsigned char *gray,
-                   struct lzw_workspace EW_GIF_FAR *w)
+                   struct color_workspace EW_GIF_FAR *w)
 {
     unsigned i, red, green, blue;
     if (count * 3U > r->length - r->pos) return 0;
@@ -143,7 +147,7 @@ static unsigned nearest(int red, int green, int blue)
 /* Choose the closest colour, then the colour closest to the mirror image of
  * the error, and the share of the second that lands nearest the target. Done
  * once per palette entry actually used, never per pixel. */
-static void quantize(struct lzw_workspace EW_GIF_FAR *w, unsigned index)
+static void quantize(struct color_workspace EW_GIF_FAR *w, unsigned index)
 {
     int target[3], other[3], delta, along;
     unsigned i, first, second;
@@ -189,7 +193,7 @@ static void color_row(struct reader *r, const struct ew_gif *out, unsigned y)
 }
 
 static void emit_color(struct reader *r, struct ew_gif *out,
-                       struct lzw_workspace EW_GIF_FAR *w, unsigned x,
+                       struct color_workspace EW_GIF_FAR *w, unsigned x,
                        unsigned index, int opaque)
 {
     unsigned offset;
@@ -266,7 +270,8 @@ static int decode_pixels(struct reader *r, struct ew_gif *out,
                 emit(out, left + x, top + y, gray[index], index != transparent,
                      r->dither_shift);
             else if (!r->skip_row)
-                emit_color(r, out, w, left + x, index, index != transparent);
+                emit_color(r, out, (struct color_workspace EW_GIF_FAR *)w,
+                           left + x, index, index != transparent);
             ++produced;
             if (++x == width) {
                 x = 0;
@@ -321,6 +326,7 @@ static int decode(const unsigned char EW_GIF_FAR *data, unsigned length,
 {
     struct reader r;
     struct lzw_workspace EW_GIF_FAR *workspace = 0;
+    struct color_workspace EW_GIF_FAR *color_workspace = 0;
     unsigned char gray[256];
     unsigned width, height, left, top, colors = 0, bytes, i, x, y;
     unsigned canvas_width, canvas_height, error;
@@ -360,18 +366,19 @@ static int decode(const unsigned char EW_GIF_FAR *data, unsigned length,
         out->stride = (out->width + 1) >> 1;
         r.opacity_stride = (out->width + 7) >> 3;
         r.identity = out->width == canvas_width;
-        workspace = far_alloc(sizeof(*workspace));
-        if (!workspace) { result = EW_GIF_NO_MEMORY; goto failed; }
+        color_workspace = far_alloc(sizeof(*color_workspace));
+        if (!color_workspace) { result = EW_GIF_NO_MEMORY; goto failed; }
+        workspace = &color_workspace->lzw;
         /* floor(x*stored/canvas) by error accumulation; keep first of each. */
         for (x = 0, y = 0, error = 0; x < canvas_width; ++x) {
-            workspace->xmap[x] = !x || error < out->width ? (uint16_t)y : 0xffffU;
+            color_workspace->xmap[x] = !x || error < out->width ? (uint16_t)y : 0xffffU;
             error += out->width;
             if (error >= canvas_width) { error -= canvas_width; ++y; }
         }
     }
     if (data[10] & 0x80) {
         colors = 2U << (data[10] & 7);
-        if (!palette(&r, colors, gray, workspace)) goto failed;
+        if (!palette(&r, colors, gray, color_workspace)) goto failed;
         if (data[11] < colors) background = gray[data[11]];
     }
     while ((marker = byte_read(&r)) >= 0) {
@@ -400,21 +407,21 @@ static int decode(const unsigned char EW_GIF_FAR *data, unsigned length,
         }
         if (flags & 0x80) {
             colors = 2U << (flags & 7);
-            if (!palette(&r, colors, gray, workspace)) goto failed;
+            if (!palette(&r, colors, gray, color_workspace)) goto failed;
         }
         if (!colors || transparent >= (int)colors) { result = EW_GIF_BAD_DATA; goto failed; }
         bytes = out->stride * out->height;
         out->pixels = far_alloc(bytes);
         if (transparent >= 0)
             out->opacity = far_alloc(r.color ? r.opacity_stride * out->height : bytes);
-        if (!workspace) workspace = far_alloc(MONO_WORKSPACE);
+        if (!workspace) workspace = far_alloc(sizeof(*workspace));
         if (!out->pixels || !workspace || (transparent >= 0 && !out->opacity)) {
             result = EW_GIF_NO_MEMORY; goto failed;
         }
         /* Colour: the uncovered canvas is the nearest solid background. */
         x = r.color && (data[10] & 0x80) && data[11] < colors ?
-            nearest(workspace->rgb[data[11]][0], workspace->rgb[data[11]][1],
-                    workspace->rgb[data[11]][2]) * 17U : r.color ? 255 : 0;
+            nearest(color_workspace->rgb[data[11]][0], color_workspace->rgb[data[11]][1],
+                    color_workspace->rgb[data[11]][2]) * 17U : r.color ? 255 : 0;
         for (i = 0; i < bytes; ++i) out->pixels[i] = (unsigned char)x;
         if (out->opacity)
             for (i = r.color ? r.opacity_stride * out->height : bytes; i--;)
