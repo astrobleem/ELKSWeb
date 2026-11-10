@@ -55,18 +55,20 @@ static int hx(int v) { return ew_color ? v >> 1 : v; }
  * its foreground or background exactly as before; the colour display uses a
  * light theme, a dark theme (F2), and the page's own <body> colours. */
 enum { R_PAGE, R_TEXT, R_LINK, R_HEAD, R_RULE, R_EDGE, R_BAR, R_BAR_TEXT,
-       R_FACE, R_FACE_TEXT, R_TITLE, R_TITLE_TEXT, R_COUNT };
+       R_FACE, R_FACE_TEXT, R_TITLE, R_TITLE_TEXT,
+       /* Browser chrome never takes the page's colours. */
+       R_FRAME, R_FIELD, R_FIELD_TEXT, R_FIELD_MARK, R_COUNT };
 static unsigned char pal[R_COUNT];
 static void set_palette(void) {
   static const unsigned char themes[2][R_COUNT] = {
     {EW_WHITE, EW_BLACK, EW_BLUE, EW_RED, EW_GRAY, EW_GRAY, EW_SILVER, EW_BLACK,
-     EW_SILVER, EW_BLACK, EW_BLUE, EW_WHITE},
+     EW_SILVER, EW_BLACK, EW_BLUE, EW_WHITE, EW_GRAY, EW_WHITE, EW_BLACK, EW_BLUE},
     {EW_BLACK, EW_SILVER, 11, EW_YELLOW, EW_GRAY, EW_SILVER, EW_GRAY, EW_WHITE,
-     EW_GRAY, EW_WHITE, EW_BLUE, EW_WHITE}};
-  /* R_PAGE, R_BAR, R_FACE and R_TITLE are backgrounds. */
+     EW_GRAY, EW_WHITE, EW_BLUE, EW_WHITE, EW_SILVER, EW_BLACK, EW_SILVER, 11}};
+  /* R_PAGE, R_BAR, R_FACE, R_TITLE and R_FIELD are backgrounds. */
   unsigned i, light;
   for (i = 0; i < R_COUNT; i++)
-    pal[i] = ew_color ? themes[inverse][i] : (0x0abeU >> i) & 1 ? fg() : bg();
+    pal[i] = ew_color ? themes[inverse][i] : (0xdabeU >> i) & 1 ? fg() : bg();
   if (!ew_color || inverse) return;
   if (ew_doc.page_bg) {
     pal[R_PAGE] = ew_doc.page_bg & 15;
@@ -383,11 +385,11 @@ static void draw(void) {
     if (ew_color && (dirty & (DRAW_PAGE | DRAW_SCROLL))) {
       /* An 8-pixel bar: grey trough, dark thumb with a grip mark. */
       ew_fillrect(PW + 1, t, 7, bot - t, pal[R_BAR]);
-      ew_vline(PW, t, bot - t, pal[R_EDGE]);
+      ew_vline(PW, t, bot - t, pal[R_FRAME]);
       if (!download_edit && ew_doc.height > bot - t) {
         int h;
         thumb(&y, &h);
-        ew_fillrect(PW + 2, y, 5, h, pal[R_EDGE]);
+        ew_fillrect(PW + 2, y, 5, h, pal[R_FRAME]);
         ew_hline(PW + 3, y + h / 2, 3, pal[R_BAR]);
       }
     } else if (dirty & (DRAW_PAGE | DRAW_SCROLL)) {
@@ -408,7 +410,9 @@ static void draw(void) {
     }
   }
   if (chrome) {
-    int edge = pal[R_EDGE], face = pal[R_FACE], field = hx(63);
+    int edge = pal[R_FRAME], face = pal[R_FACE], field = hx(63);
+    f = pal[R_FIELD_TEXT];
+    b = pal[R_FIELD];
     if (dirty & DRAW_FRAME) {
       if (ew_color) {
         ew_fillrect(0, EW_BODY_HEIGHT, SW, top() - EW_BODY_HEIGHT, pal[R_BAR]);
@@ -446,7 +450,7 @@ static void draw(void) {
       while (len && ew_body_width(s + start, len, 0) > SW - field - 9)
         len--;
       textn(field + 3, NAV_Y+2, s + start, len, editing && selectall ? b : f,
-            editing && selectall ? pal[R_LINK] : b, 0);
+            editing && selectall ? pal[R_FIELD_MARK] : b, 0);
       if (editing && !selectall)
         ew_vline(field + 3 + ew_body_width(
                           s + start,
@@ -466,6 +470,8 @@ static void draw(void) {
     }
   }
   if (dirty & DRAW_PAGE) {
+    f = pal[R_TEXT];
+    b = pal[R_PAGE];
     ew_clip(PW, t, bot);
     if (select_open >= 0) {
       int has_scroll = ew_select_count(select_open) > 8;
