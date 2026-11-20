@@ -31,18 +31,22 @@ static unsigned long color_bytes;
  * conventional decode. This lowers retained memory, not peak decode RAM. */
 static void mono_to_ems(struct ew_gif *image)
 {
-  unsigned char row[80];
-  unsigned y, x;
+  /* Three 80-byte maximum rows fit one 256-byte helper request. */
+  unsigned char rows[3*80];
+  unsigned y, x, n, count;
   unsigned long at, bytes = (unsigned long)image->stride * image->height;
   struct ew_store *store;
   if (image->opacity || bytes <= 16384UL || !ew_store_ems_requested()) return;
   store = ew_store_try_ems(bytes);
   if (!store) return;
-  for (y = 0; y < image->height; ++y) {
+  for (y = 0; y < image->height; y += n) {
+    n = image->height - y;
+    if (n > 3) n = 3;
+    count = n * image->stride;
     at = (unsigned long)y * image->stride;
-    for (x = 0; x < image->stride; ++x)
-      row[x] = image->pixels[(unsigned)at + x];
-    if (ew_store_write(store, at, row, image->stride)) {
+    for (x = 0; x < count; ++x)
+      rows[x] = image->pixels[(unsigned)at + x];
+    if (ew_store_write(store, at, rows, count)) {
       ew_store_free(store);
       return;
     }
