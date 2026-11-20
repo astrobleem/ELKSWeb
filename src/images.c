@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../image/gif.h"
+#include "../image/store.h"
+#include "../platform/elks_store.h"
+#define LOADED(i) ((i)->pixels || (i)->store)
 #include "../image/dimensions.h"
 #include "../font/body_font.h"
 #include "elks_platform.h"
@@ -24,11 +27,63 @@ static char document_error[96];
  * instead of being lost. */
 #define COLOR_CACHE_BYTES 81920UL
 static unsigned long color_bytes;
+/* Migrate completed opaque monochrome pixels only after a successful
+ * conventional decode. This lowers retained memory, not peak decode RAM. */
+static void mono_to_ems(struct ew_gif *image)
+{
+  unsigned char row[80];
+  unsigned y, x;
+  unsigned long at, bytes = (unsigned long)image->stride * image->height;
+  struct ew_store *store;
+  if (image->opacity || bytes <= 16384UL || !ew_store_ems_requested()) return;
+  store = ew_store_try_ems(bytes);
+  if (!store) return;
+  for (y = 0; y < image->height; ++y) {
+    at = (unsigned long)y * image->stride;
+    for (x = 0; x < image->stride; ++x)
+      row[x] = image->pixels[(unsigned)at + x];
+    if (ew_store_write(store, at, row, image->stride)) {
+      ew_store_free(store);
+      return;
+    }
+  }
+  ew_far_free(image->pixels);
+  image->pixels = NULL;
+  image->store = store;
+}
+
+/* Keep the existing area-filtered path for explicit reduction. Move an
+ * opaque mono image back to RAM only if that path actually needs it. */
+static int mono_to_ram(struct ew_gif *image)
+{
+  unsigned char row[80];
+  unsigned char EW_FAR *pixels;
+  unsigned y, x;
+  unsigned long at;
+  pixels = ew_far_alloc((unsigned long)image->stride * image->height);
+  if (!pixels) return -1;
+  for (y = 0; y < image->height; ++y) {
+    at = (unsigned long)y * image->stride;
+    if (ew_store_read(image->store, at, row, image->stride)) {
+      ew_far_free(pixels);
+      return -1;
+    }
+    for (x = 0; x < image->stride; ++x) pixels[(unsigned)at + x] = row[x];
+  }
+  ew_store_free(image->store);
+  image->store = NULL;
+  image->pixels = pixels;
+  return 0;
+}
 static int decode(const unsigned char EW_FAR *data, unsigned size, struct ew_gif *image) {
   unsigned width, height, limit_width, limit_height, attempt;
   unsigned long need;
   int result = EW_GIF_NO_MEMORY;
-  if (!ew_color) return ew_gif_decode_aspect(data, size, image, ew_pixel_aspect);
+  if (!ew_color) {
+    result = ew_gif_decode_aspect(data, size, image, ew_pixel_aspect);
+    if (result == EW_GIF_OK) mono_to_ems(image);
+    return result;
+  }
   if (size < 10) return ew_gif_decode_color(data, size, image, 1, 1);
   limit_width = EW_PAGE_WIDTH - 8;
   limit_height = 200;
@@ -46,7 +101,12 @@ static int decode(const unsigned char EW_FAR *data, unsigned size, struct ew_gif
     }
     need = (unsigned long)((width + 1) >> 1) * height;
     if (color_bytes + need > COLOR_CACHE_BYTES) continue;
-    result = ew_gif_decode_color(data, size, image, limit_width, limit_height);
+    if (ew_store_ems_requested())
+      result = ew_gif_decode_color_store(data, size, image, limit_width, limit_height);
+    /* A service can fail after allocating; unwind and retain the original
+     * conventional decoder before reducing the image. */
+    if (result == EW_GIF_NO_MEMORY)
+      result = ew_gif_decode_color(data, size, image, limit_width, limit_height);
     if (result != EW_GIF_NO_MEMORY) break;
   }
   if (result == EW_GIF_OK) color_bytes += (unsigned long)image->stride * image->height;
@@ -72,7 +132,7 @@ int ew_image_lookup(const char *url, unsigned *width, unsigned *height) {
   int i = image_find(url);
   if (width) *width = i < 0 ? 0 : natural_width[i];
   if (height) *height = i < 0 ? 0 : natural_height[i];
-  return i >= 0 && images[i].pixels ? i : -1;
+  return i >= 0 && LOADED(&images[i]) ? i : -1;
 }
 void ew_images_clear(void) {
   unsigned i;
@@ -185,7 +245,7 @@ void ew_images_load(void) {
     ew_copy_from_far(url, ew_doc.text + r->off, sizeof(url));
     index = image_find(url);
     if (index >= 0) {
-      if (images[index].pixels) r->style = index;
+      if (LOADED(&images[index])) r->style = index;
       continue;
     }
     if (image_count == IMAGE_LIMIT) continue;
@@ -320,13 +380,17 @@ void ew_image_draw(const struct ew_run EW_FAR *r, int x, int y, int top, int bot
   if (!r->n || !r->w || top>=bottom || y>=bottom ||
       (long)y+r->w<=top || x>=EW_SCREEN_WIDTH || (long)x+r->n<=0)
     return;
-  if (r->style >= image_count || !images[r->style].pixels) {
+  if (r->style >= image_count || !LOADED(&images[r->style])) {
     image_placeholder(r,x,y,top,bottom,inverse);
     return;
   }
   image = &images[r->style];
   reduce=image->depth!=4 &&
          (image->width>r->n || image->height/(unsigned)ew_pixel_aspect>r->w);
+  if (reduce && image->store && mono_to_ram(image)) {
+    image_placeholder(r,x,y,top,bottom,inverse);
+    return;
+  }
   first_col=x<0 ? (unsigned)(-(long)x) : 0;
   last_col=(long)x+r->n>EW_SCREEN_WIDTH ? (unsigned)(EW_SCREEN_WIDTH-(long)x) : r->n;
   first_row=y<top ? (unsigned)(top-(long)y) : 0;
@@ -349,7 +413,15 @@ void ew_image_draw(const struct ew_run EW_FAR *r, int x, int y, int top, int bot
   for (row=first_row;row<last_row;++row,++screen_y) {
     end_y=sy+y_step+(y_error>=r->w-y_remainder);
     if (!reduce && image->depth!=4 && sy!=previous_row) {
-      ew_gif_copy_row(image,sy,bits,opacity);
+      if (image->store) {
+        if (ew_store_read(image->store, (unsigned long)sy * image->stride,
+                          bits, image->stride)) {
+          image_placeholder(r,x,y,top,bottom,inverse);
+          return;
+        }
+        memset(opacity, 255, image->stride);
+      } else
+        ew_gif_copy_row(image,sy,bits,opacity);
       previous_row=sy;
     }
     sx=start_sx;
@@ -358,11 +430,21 @@ void ew_image_draw(const struct ew_run EW_FAR *r, int x, int y, int top, int bot
     if (image->depth==4) {
       /* Assemble the row in near memory at the display's nibble phase, then
        * hand it to the driver as whole bytes. */
-      const unsigned char EW_FAR *source=image->pixels+sy*image->stride;
+      const unsigned char EW_FAR *source=image->pixels ? image->pixels+sy*image->stride : NULL;
       const unsigned char EW_FAR *cover=image->opacity ?
           image->opacity+sy*((image->width+7)>>3) : NULL;
+      unsigned char stored[160], covered[40];
       unsigned at=screen_x&1, count=last_col-first_col;
       unsigned char pixel;
+      if (image->store) {
+        if (ew_store_read(image->store, (unsigned long)sy*image->stride,
+                          stored, image->stride) ||
+            (image->masked && ew_store_read(image->store, image->opacity_at +
+             (unsigned long)sy*((image->width+7)>>3), covered, (image->width+7)>>3))) {
+          image_placeholder(r,x,y,top,bottom,inverse); return;
+        }
+        source=stored; cover=image->masked ? covered : NULL;
+      }
       if (count>320) count=320;
       if (cover) memset(opacity,0,40);
       if (image->width==r->n && !cover) {
@@ -383,7 +465,6 @@ void ew_image_draw(const struct ew_run EW_FAR *r, int x, int y, int top, int bot
         }
       } else {
         /* Scaled or transparent: bring the stored row near, then sample. */
-        unsigned char stored[160], covered[40];
         for (col=0;col<image->stride && col<160;++col) stored[col]=source[col];
         if (cover) for (col=0;col<(image->width+7)>>3 && col<40;++col) covered[col]=cover[col];
         for (col=0;col<count;++col,++at) {
